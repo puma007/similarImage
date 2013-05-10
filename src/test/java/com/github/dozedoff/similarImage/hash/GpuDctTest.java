@@ -18,8 +18,10 @@
 package com.github.dozedoff.similarImage.hash;
 
 import static org.hamcrest.CoreMatchers.is;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertThat;
 
+import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -40,6 +42,15 @@ public class GpuDctTest {
 		
 		for(int i=0; i < size; i++){
 			result[i] = (float)(Math.random()*10);
+		}
+		return result;
+	}
+	
+	private double[] generateDoubleArray(int size){
+		double result[] = new double[size];
+		
+		for(int i=0; i < size; i++){
+			result[i] = (Math.random()*10);
 		}
 		return result;
 	}
@@ -152,24 +163,21 @@ public class GpuDctTest {
 		final double dctGpu[] = new double[SIZE * SIZE]; //result
 		final double dctCpu[] = new double[SIZE * SIZE]; //result
 		
-		Kernel dctKernel = new DctKernel(coeff, SIZE, dataFlat, dctGpu);
+		DctKernel dctKernel = new DctKernel(coeff, SIZE, dataFlat, dctGpu);
 		
 		Range range = Range.create2D(SIZE, SIZE);
 		dctKernel.setExecutionMode(EXECUTION_MODE.GPU);
 		dctKernel.execute(range);
 		dctKernel.dispose();
 		
-		dctKernel = new DctKernel(coeff, SIZE, dataFlat, dctCpu);
+		dctKernel.setup(dataFlat, dctCpu);
 		
 		range = Range.create2D(SIZE, SIZE);
 		dctKernel.setExecutionMode(EXECUTION_MODE.CPU);
 		dctKernel.execute(range);
 		dctKernel.dispose();
-		
 		int runLenght = SIZE * SIZE;
-		for(int i = 0; i < runLenght; i++){
-			assertThat(dctGpu[i], is(dctCpu[i]));
-		}
+		Assert.assertArrayEquals(dctCpu, dctGpu, 0);
 	}
 	
 	@Test
@@ -188,5 +196,74 @@ public class GpuDctTest {
 		kernel.setExecutionMode(EXECUTION_MODE.GPU);
 		kernel.execute(SAMPLE_SIZE);
 		kernel.dispose();
+	}
+	
+	
+	@Test
+	public void sinDoubleTest() {
+		final int SAMPLE_SIZE = 1024;
+		final double data[] = generateDoubleArray(SAMPLE_SIZE);
+		final double cpu[]= new double[SAMPLE_SIZE], gpu[] = new double[SAMPLE_SIZE];
+		
+		Kernel kernel = new SinDoubleKernel(data, gpu);
+		kernel.setExecutionMode(EXECUTION_MODE.GPU);
+		kernel.execute(SAMPLE_SIZE);
+		kernel.dispose();
+		
+		kernel = new SinDoubleKernel(data, cpu);
+		kernel.setExecutionMode(EXECUTION_MODE.CPU);
+		kernel.execute(SAMPLE_SIZE);
+		kernel.dispose();
+		
+		Assert.assertArrayEquals(cpu, gpu, 0);
+	}
+	
+	@Test
+	public void sinFloatTest() {
+		final int SAMPLE_SIZE = 1024;
+		final float data[] = generateFloatArray(SAMPLE_SIZE);
+		final float cpu[]= new float[SAMPLE_SIZE], gpu[] = new float[SAMPLE_SIZE];
+		
+		Kernel kernel = new SinFloatKernel(data, gpu);
+		kernel.setExecutionMode(EXECUTION_MODE.GPU);
+		kernel.execute(SAMPLE_SIZE);
+		kernel.dispose();
+		
+		kernel = new SinFloatKernel(data, cpu);
+		kernel.setExecutionMode(EXECUTION_MODE.CPU);
+		kernel.execute(SAMPLE_SIZE);
+		kernel.dispose();
+		
+		Assert.assertArrayEquals(cpu, gpu, 0);
+	}
+	
+	class SinDoubleKernel extends Kernel {
+		final double data[], result[];
+		
+		public SinDoubleKernel(double[] data, double[] result) {
+			this.data = data;
+			this.result = result;
+		}
+
+		@Override
+		public void run() {
+			int i = getGlobalId();
+			result[i] = sin(data[i]);
+		}
+	}
+	
+	class SinFloatKernel extends Kernel {
+		final float data[], result[];
+		
+		public SinFloatKernel(float[] data, float[] result) {
+			this.data = data;
+			this.result = result;
+		}
+
+		@Override
+		public void run() {
+			int i = getGlobalId();
+			result[i] = sin(data[i]);
+		}
 	}
 }

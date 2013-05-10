@@ -17,21 +17,20 @@
 */
 package com.github.dozedoff.similarImage.hash;
 
-import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.sql.SQLException;
 import java.util.LinkedList;
-import java.util.concurrent.LinkedBlockingQueue;
 
 import javax.imageio.IIOException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.github.dozedoff.commonj.io.DataProvider;
+import com.github.dozedoff.commonj.util.Pair;
 import com.github.dozedoff.similarImage.db.ImageRecord;
 import com.github.dozedoff.similarImage.db.Persistence;
 import com.github.dozedoff.similarImage.gui.IGUIevent;
@@ -44,10 +43,10 @@ public class PhashWorker extends Thread {
 	private boolean stop = false;
 	private IGUIevent guiEvent;
 	
-	LinkedBlockingQueue<Path> imagePaths;
+	DataProvider dataProvider;
 	
-	public PhashWorker(LinkedBlockingQueue<Path> imagePaths, IGUIevent guiEvent) {
-		this.imagePaths = imagePaths;
+	public PhashWorker(DataProvider dataProvider, IGUIevent guiEvent) {
+		this.dataProvider = dataProvider;
 		localWorkerNumber = workerNumber;
 		workerNumber++;
 		this.setName("pHash worker " + localWorkerNumber);
@@ -56,54 +55,58 @@ public class PhashWorker extends Thread {
 	
 	@Override
 	public void run() {
-		calculateHashes(imagePaths);
+		calculateHashes();
 	}
 	
 	public void stopWorker() {
 		this.stop = true;
 	}
 	
-	private void calculateHashes(LinkedBlockingQueue<Path> imagePaths) {
+	private void calculateHashes() {
 		logger.info("{} started", this.getName());
 		Persistence persistence = Persistence.getInstance();
 		ImagePHashGPU phash = new ImagePHashGPU(32,9);
-		LinkedList<Path> work = new LinkedList<Path>();
+		LinkedList<Pair<Path, byte[]>> work = new LinkedList<Pair<Path, byte[]>>();
 		LinkedList<ImageRecord> newRecords = new LinkedList<ImageRecord>();
 		
 		while(!stop) {
-			if(imagePaths.isEmpty()) {
-				logger.info("No more work, {} terminating...", this.getName());
-				break;
+			while(dataProvider.isEmpty()) {
+				synchronized (dataProvider) {
+					try {
+						dataProvider.wait();
+					} catch (InterruptedException e) {interrupt();}
+				}
 			}
 			
-			imagePaths.drainTo(work, MAX_WORK_BATCH_SIZE);
+			dataProvider.drainData(work, MAX_WORK_BATCH_SIZE);
 			
-			for (Path path : work) {
+			for (Pair<Path, byte[]> fileData : work) {
 				if(stop) {
 					break;
 				}
 				
 				try {
-					if (persistence.isPathRecorded(path)) {
+					if (persistence.isPathRecorded(fileData.getLeft())) {
 						continue;
 					}
 
-					InputStream is = new BufferedInputStream(Files.newInputStream(path, StandardOpenOption.READ));
+					InputStream is = new ByteArrayInputStream(fileData.getRight());
 					long hash = phash.getLongHash(is);
 					is.close();
 					
-					ImageRecord record = new ImageRecord(path.toString(), hash);
+					ImageRecord record = new ImageRecord(fileData.getLeft().toString(), hash);
 					newRecords.add(record);
 				} catch (IIOException iioe) {
-					logger.warn("Unable to process image {} - {}", path, iioe.getMessage());
+					logger.warn("Unable to process image {} - {}", fileData, iioe.getMessage());
 				} catch (IOException e) {
-					logger.warn("Could not load file {} - {}", path, e.getMessage());
+					logger.warn("Could not load file {} - {}", fileData, e.getMessage());
 				} catch (SQLException e) {
 					logger.warn("Database operation failed", e);
 				} catch (Exception e) {
-					logger.warn("Failed to hash image {} - {}", path, e.getMessage());
+					logger.warn("Failed to hash image {} - {}", fileData, e.getMessage());
 				}
 			}
+			
 			try {
 				Persistence.getInstance().batchAddRecord(newRecords);
 				newRecords.clear();

@@ -34,6 +34,7 @@ import org.slf4j.LoggerFactory;
 
 import com.github.dozedoff.commonj.file.FilenameFilterVisitor;
 import com.github.dozedoff.commonj.filefilter.SimpleImageFilter;
+import com.github.dozedoff.commonj.io.DataProvider;
 import com.github.dozedoff.similarImage.db.ImageRecord;
 import com.github.dozedoff.similarImage.db.Persistence;
 import com.github.dozedoff.similarImage.duplicate.DuplicateEntry;
@@ -94,8 +95,11 @@ public class SimilarImage implements IGUIevent{
 	
 	private void calculateHashes(LinkedBlockingQueue<Path> imagePaths) {
 		logger.info("Creating and starting workers...");
+		DataProvider dataProvider = new DataProvider();
+		dataProvider.addToLoad(imagePaths);
+		
 		for(int i=0; i < WORKER_TREADS; i++) {
-			workers[i] = new PhashWorker(imagePaths, this);
+			workers[i] = new PhashWorker(dataProvider, this);
 			workers[i].start();
 		}
 		
