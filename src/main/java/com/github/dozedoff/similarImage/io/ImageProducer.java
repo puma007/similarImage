@@ -164,6 +164,11 @@ public class ImageProducer extends DataProducer<Path, Pair<Path, BufferedImage>>
 	}
 
 	@Override
+	public boolean hasWork() {
+		return !(inputQueue.isEmpty() && outputQueue.isEmpty());
+	}
+
+	@Override
 	public void drainTo(Collection<Pair<Path, BufferedImage>> drainTo, int maxElements) throws InterruptedException {
 		for (int i = 0; i < maxElements; i++) {
 			Pair<Path, BufferedImage> element = outputQueue.poll();
