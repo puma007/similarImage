@@ -24,9 +24,10 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.imageio.IIOException;
@@ -48,9 +49,8 @@ public class ImageProducer extends DataProducer<Path, Pair<Path, BufferedImage>>
 	private final AtomicInteger total = new AtomicInteger();
 	private final AtomicInteger processed = new AtomicInteger();
 	private final int maxOutputQueueSize;
-
-	private final int MAX_WAIT_TIME = 10000;
-	private final int WORK_BATCH_SIZE = 20;
+	private final ConcurrentLinkedQueue<Path> inputQueue = new ConcurrentLinkedQueue<Path>();
+	private final ConcurrentLinkedQueue<Pair<Path, BufferedImage>> outputQueue = new ConcurrentLinkedQueue<Pair<Path, BufferedImage>>();
 
 	public ImageProducer(int maxOutputQueueSize, Persistence persistence) {
 		super(maxOutputQueueSize);
@@ -70,18 +70,20 @@ public class ImageProducer extends DataProducer<Path, Pair<Path, BufferedImage>>
 	@Override
 	public void addToLoad(List<Path> paths) {
 		total.addAndGet(paths.size());
-		super.addToLoad(paths);
+		inputQueue.addAll(paths);
+		synchronized (inputQueue) {
+			inputQueue.notify();
+		}
 	}
 
 	@Override
 	public void addToLoad(Path... paths) {
-		total.addAndGet(paths.length);
-		super.addToLoad(paths);
+		addToLoad(Arrays.asList(paths));
 	}
 
 	@Override
 	public void clear() {
-		super.clear();
+		inputQueue.clear();
 		processed.set(0);
 		total.set(0);
 	}
@@ -92,45 +94,57 @@ public class ImageProducer extends DataProducer<Path, Pair<Path, BufferedImage>>
 
 	@Override
 	protected void loaderDoWork() throws InterruptedException {
-		Path n = null;
-		ArrayList<Path> work = new ArrayList<Path>(WORK_BATCH_SIZE + 1);
+		Path p;
 
-		if (isBufferFilled() || input.isEmpty()) {
-			synchronized (output) {
-				output.notifyAll();
+		emptyWait();
+
+		p = inputQueue.poll();
+
+		try {
+			processFile(p);
+			fullWait();
+		} catch (IIOException e) {
+			logger.warn("Failed to process image(IIO) - {}", e.getMessage());
+			try {
+				persistence.addBadFile(new BadFileRecord(p));
+			} catch (SQLException e1) {
+				logger.warn("Failed to add bad file record for {} - {}", p, e.getMessage());
+			}
+		} catch (IOException e) {
+			logger.warn("Failed to load file - {}", e.getMessage());
+		} catch (SQLException e) {
+			logger.warn("Failed to query database - {}", e.getMessage());
+		} catch (Exception e) {
+			logger.warn("Failed to process image(other) - {}", e.getMessage());
+			try {
+				persistence.addBadFile(new BadFileRecord(p));
+			} catch (SQLException e1) {
+				logger.warn("Failed to add bad file record for {} - {}", p, e.getMessage());
 			}
 		}
+	}
 
-		n = input.take();
-		work.add(n);
-		input.drainTo(work, WORK_BATCH_SIZE);
+	private void emptyWait() throws InterruptedException {
+		while (inputQueue.isEmpty()) {
+			synchronized (inputQueue) {
+				inputQueue.wait();
+			}
+		}
+	}
 
-		for (Path p : work) {
-			try {
-				processFile(p);
-			} catch (IIOException e) {
-				logger.warn("Failed to process image(IIO) - {}", e.getMessage());
-				try {
-					persistence.addBadFile(new BadFileRecord(p));
-				} catch (SQLException e1) {
-					logger.warn("Failed to add bad file record for {} - {}", p, e.getMessage());
-				}
-			} catch (IOException e) {
-				logger.warn("Failed to load file - {}", e.getMessage());
-			} catch (SQLException e) {
-				logger.warn("Failed to query database - {}", e.getMessage());
-			} catch (Exception e) {
-				logger.warn("Failed to process image(other) - {}", e.getMessage());
-				try {
-					persistence.addBadFile(new BadFileRecord(p));
-				} catch (SQLException e1) {
-					logger.warn("Failed to add bad file record for {} - {}", p, e.getMessage());
-				}
+	private void fullWait() throws InterruptedException {
+		while (outputQueue.size() >= maxOutputQueueSize) {
+			synchronized (outputQueue) {
+				outputQueue.wait();
 			}
 		}
 	}
 
 	private void processFile(Path next) throws SQLException, IOException, InterruptedException {
+		if (next == null) {
+			return;
+		}
+
 		if (persistence.isBadFile(next) || persistence.isPathRecorded(next)) {
 			processed.addAndGet(1);
 			totalProgress.setValue(processed.get());
@@ -142,41 +156,34 @@ public class ImageProducer extends DataProducer<Path, Pair<Path, BufferedImage>>
 		BufferedImage img = ImageIO.read(is);
 
 		Pair<Path, BufferedImage> pair = new Pair<Path, BufferedImage>(next, img);
-		output.put(pair);
+		outputQueue.add(pair);
+		outputQueueChanged();
 
 		processed.addAndGet(1);
 		totalProgress.setValue(processed.get());
 	}
 
 	@Override
-	protected void outputQueueChanged() {
-		bufferLevel.setValue(output.size());
+	public void drainTo(Collection<Pair<Path, BufferedImage>> drainTo, int maxElements) throws InterruptedException {
+		for (int i = 0; i < maxElements; i++) {
+			Pair<Path, BufferedImage> element = outputQueue.poll();
+
+			if (element == null) {
+				break;
+			}
+
+			drainTo.add(element);
+		}
+
+		synchronized (outputQueue) {
+			outputQueue.notify();
+		}
+
+		outputQueueChanged();
 	}
 
 	@Override
-	public void drainTo(Collection<Pair<Path, BufferedImage>> drainTo, int maxElements) throws InterruptedException {
-		if (isBufferLow() && (!input.isEmpty())) {
-			synchronized (output) {
-				logger.debug("Low buffer, suspending drain");
-
-				try {
-					output.wait(MAX_WAIT_TIME);
-				} catch (InterruptedException e) {
-					logger.debug("Max wait has timed out, resuming drain");
-					return;
-				}
-
-				logger.debug("Buffer re-filled, resuming drain");
-			}
-		}
-		super.drainTo(drainTo, maxElements);
-	}
-
-	private boolean isBufferLow() {
-		return output.size() < (float) maxOutputQueueSize * 0.10f;
-	}
-
-	private boolean isBufferFilled() {
-		return output.size() > (float) maxOutputQueueSize * 0.90f;
+	protected void outputQueueChanged() {
+		bufferLevel.setValue(output.size());
 	}
 }
